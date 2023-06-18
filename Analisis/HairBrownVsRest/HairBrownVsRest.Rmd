@@ -1,0 +1,200 @@
+---
+title: "HairBrownVsRestRecod"
+author: "Estefanía Gómez Guil"
+date: "2023-06-11"
+output:
+  word_document:
+    toc: yes
+  pdf_document:
+    toc: yes
+  html_document:
+    code_folding: hide
+    toc: yes
+---
+
+
+```{r setup, include=FALSE}
+R.version.string
+knitr::opts_chunk$set(
+	echo = TRUE,
+	message = TRUE,
+	warning = TRUE
+)
+
+library(xfun)
+library(rlang)
+library(limma)
+library(readr)
+library(stringr)
+library(HsAgilentDesign026652.db)
+library(GEOquery)
+library(ggplot2)
+library(EnhancedVolcano)
+library(GO.db)
+
+installed_packages <- installed.packages()
+package_names <- rownames(installed_packages)
+print(package_names)
+loaded_packages <- library("EnhancedVolcano")
+print(loaded_packages)
+```
+
+## 1. Importación de datos
+```{r}
+params <- list(
+  Brown="Brown",
+  Rest="Rest",
+  directorio= "/Users/estefaniagomezguil/Desktop/HairBrownVsRestRecod"
+)
+ruta_brown<- file.path(params$directorio, "Brown")
+ruta_rest<- file.path(params$directorio, "Resto")
+
+files_brown <- list.files(path = ruta_brown, pattern = ".txt", full.names = TRUE)
+files_rest <- list.files(path = ruta_rest, pattern = ".txt", full.names = TRUE)
+Grupo <- c (rep(params$Brown, length(files_brown)), rep(params$Rest, length(files_rest)))
+files <- c(files_brown, files_rest)
+print(files)
+targets = read.maimages(file=files, source="agilent", green.only=TRUE)
+targets$targets$class <- Grupo
+files2<- str_remove_all(string=files, pattern= "US85003608_253949442215")
+files2<- str_remove_all(string=files2, patter= "_S01_GE1_107_Sep09")
+
+```
+
+## 2. Control de calidad
+
+```{r}
+limma::plotMA3by2(targets, status = targets$genes$ControlType, prefix = "MA", device = "pdf")
+# Obtener los grupos únicos y sus correspondientes colores
+grupos_unicos <- unique(Grupo)
+
+colores <- 1:4
+Grupo2<-colores
+plotMDS(targets, top = 100, gene.selection = "pairwise", pch=colores, type="p", plot = TRUE)
+
+# Agregar la leyenda
+legend("topright", legend = grupos_unicos, pch = colores, title = "Grupos")
+legend("topright", legend = grupos_unicos, pch = colores, title = "Grupos")
+
+boxplot(targets$E, col = "royalblue", names = str_trunc(targets$targets$FileName, width = 10, side = "left"))
+```
+
+## 3. Preprocesado
+
+### 3.1 Background
+```{r}
+BK <- backgroundCorrect(targets, method ="normexp", printer=targets$printer, verbose=TRUE)
+```
+
+### 3.2 Normalización
+```{r}
+MA.p<-normalizeBetweenArrays(BK, method = 'quantile')
+transposed <- t(MA.p$E)
+df<-data.frame(value = transposed, group = as.character(Grupo))
+plotDensities(MA.p, legend = FALSE, type="1")
+```
+
+
+### 3.3 Anotación
+```{r}
+MA.p$genes$EntrezID<- mapIds(HsAgilentDesign026652.db, MA.p$genes$ProbeName, keytype = "PROBEID", column = "ENTREZID")
+MA.p$genes$Symbol <- mapIds(HsAgilentDesign026652.db, MA.p$genes$ProbeName, keytype = "PROBEID", column = "SYMBOL")
+map=getGEO("GPL20844")
+```
+### 3.3 Filtrado
+```{r}
+control_1 =MA.p$genes$ControlType == 1
+control_b= MA.p$genes$ControlType == -1
+```
+
+```{r}
+NoSym = is.na(MA.p$genes$Symbol)
+NoEnID= is.na(MA.p$genes$EntrezID)
+table(NoEnID)
+```
+
+```{r}
+yfilt = MA.p[!control_1& !control_b & !NoSym & !NoEnID,]
+```
+
+```{r}
+boxplot(yfilt$E, col = "royalblue", names = str_trunc(targets$targets$FileName, width = 10, side = "left"))
+```
+
+```{r}
+pcomp=prcomp(yfilt$E, scale. = TRUE)
+eso=summary(pcomp)
+eso
+```
+
+```{r}
+com=as.data.frame(pcomp$x)
+ggplot(com, aes(PC1, PC2)) + geom_point()+theme_bw(base_size=32)+xlab(paste("PC1:",eso$importance[2,1])) + ylab(paste("PC2:",eso$importance[2,2]))+theme(legend.position="top")
+```
+
+
+## 4. Expresión Diferencial
+
+
+### 4.1 Modelización i Regresión
+
+```{r}
+design <- model.matrix(~0+Grupo)
+colnames(design) = c(params$Brown, params$Rest)
+design
+fit = lmFit(yfilt, design)
+```
+
+```{r}
+parametre1 = params$Brown
+parametre2 = params$Rest
+
+contraste = makeContrasts(Brown-Rest, levels = design)
+fit2 = contrasts.fit(fit, contraste)
+fit2 = eBayes(fit2)
+
+```
+
+
+### 4.2 Resultados
+
+```{r}
+topTable(fit2, adjust.method = "bonferroni", n=30)
+tT=topTable(fit2, adjust.method = "bonferroni", n=3000)
+
+results = decideTests(fit2, p.value = 0.1)
+summary(decideTests(fit2), p.value = 0.1)
+```
+
+
+```{r}
+EnhancedVolcano(tT, lab = tT$Symbol, x = "logFC", y = "adj.P.Val", pCutoff = 0.05, FCcutoff=2, labSize = 6.0, ylim=0.95)
+```
+
+
+
+
+
+```{r}
+vennDiagram(results, include=c("both"), circle.col = "red", counts.col = "blue", names = c("CHD9-CTL"))
+```
+
+
+
+## 5. Gene Enrichment Analysis
+
+
+### Gene Ontology
+
+```{r}
+g = goana(fit2, species="Hs", geneid = fit2$genes$EntrezID, FDR = 0.05)
+topGO(g, n=20)
+```
+
+
+### KEGG
+
+```{r}
+k = kegga(fit2, species="Hs", geneid = fit2$genes$EntrezID, FDR = 0.05)
+topKEGG(k, number = 20)
+```
